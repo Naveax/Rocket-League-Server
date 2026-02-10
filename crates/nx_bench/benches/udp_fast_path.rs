@@ -1,12 +1,16 @@
 use std::net::UdpSocket;
+use std::net::{IpAddr, Ipv4Addr};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use nx_netio::{MsgBuf, RecvBatchState};
+use nx_proxy::anomaly::AnomalyDetector;
+use nx_proxy::config::{AnomalyModel, AnomalySection, RateLimitSection};
 
 const PACKETS: usize = 20_000;
 const BATCH: usize = 32;
+const ANOMALY_SAMPLES: usize = 20_000;
 
 fn main() {
     let fallback_pps = bench_fallback_pps();
@@ -25,6 +29,11 @@ fn main() {
     let (p50_us, p99_us) = bench_queue_latency_us();
     println!("enqueue_forward_latency_p50_us={p50_us:.2}");
     println!("enqueue_forward_latency_p99_us={p99_us:.2}");
+
+    let (anomaly_p50_us, anomaly_p99_us, anomaly_drop_ratio) = bench_anomaly_latency_us();
+    println!("anomaly_latency_p50_us={anomaly_p50_us:.2}");
+    println!("anomaly_latency_p99_us={anomaly_p99_us:.2}");
+    println!("anomaly_drop_ratio={anomaly_drop_ratio:.4}");
 }
 
 fn bench_fallback_pps() -> f64 {
@@ -113,4 +122,66 @@ fn percentile(samples: &[f64], p: f64) -> f64 {
     }
     let idx = ((samples.len() - 1) as f64 * p).round() as usize;
     samples[idx.min(samples.len() - 1)]
+}
+
+fn bench_anomaly_latency_us() -> (f64, f64, f64) {
+    let mut detector = AnomalyDetector::new(&anomaly_cfg(), &rate_cfg());
+    let src = IpAddr::V4(Ipv4Addr::new(10, 77, 0, 1));
+    let base = Instant::now();
+    let mut latencies_us = Vec::with_capacity(ANOMALY_SAMPLES);
+    let mut drops = 0usize;
+
+    for i in 0..ANOMALY_SAMPLES {
+        let now = base + Duration::from_millis((i / 20) as u64);
+        let packet_len = if i % 13 == 0 { 1200 } else { 256 };
+        let start = Instant::now();
+        if detector.check_anomaly(src, packet_len, now).is_some() {
+            drops = drops.saturating_add(1);
+        }
+        latencies_us.push(start.elapsed().as_secs_f64() * 1_000_000.0);
+    }
+
+    latencies_us.sort_by(|a, b| a.partial_cmp(b).expect("valid float compare"));
+    let p50 = percentile(&latencies_us, 0.50);
+    let p99 = percentile(&latencies_us, 0.99);
+    let drop_ratio = drops as f64 / ANOMALY_SAMPLES as f64;
+    (p50, p99, drop_ratio)
+}
+
+fn anomaly_cfg() -> AnomalySection {
+    AnomalySection {
+        enabled: true,
+        model: AnomalyModel::Heuristic,
+        anomaly_threshold: 0.80,
+        ddos_limit: 500.0,
+        window_millis: 200,
+        ema_alpha: 0.35,
+        min_packets_per_window: 8,
+        max_tracked_ips: 1024,
+        idle_timeout_secs: 60,
+        torch_model_path: None,
+    }
+}
+
+fn rate_cfg() -> RateLimitSection {
+    RateLimitSection {
+        per_ip_packets_per_second: 500.0,
+        per_ip_burst_packets: 1_000.0,
+        per_ip_bytes_per_second: 500_000.0,
+        per_ip_burst_bytes: 1_000_000.0,
+        global_packets_per_second: 50_000.0,
+        global_burst_packets: 100_000.0,
+        global_bytes_per_second: 128_000_000.0,
+        global_burst_bytes: 256_000_000.0,
+        subnet_enabled: false,
+        subnet_ipv4_prefix: 24,
+        subnet_ipv6_prefix: 64,
+        subnet_packets_per_second: 8_000.0,
+        subnet_burst_packets: 16_000.0,
+        subnet_bytes_per_second: 64_000_000.0,
+        subnet_burst_bytes: 128_000_000.0,
+        max_ip_buckets: 1024,
+        max_subnet_buckets: 256,
+        idle_timeout_secs: 120,
+    }
 }

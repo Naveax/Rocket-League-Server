@@ -1,3 +1,4 @@
+pub mod anomaly;
 pub mod challenge;
 pub mod config;
 pub mod lane;

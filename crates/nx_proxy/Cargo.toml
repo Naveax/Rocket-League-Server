@@ -18,9 +18,14 @@ path = "src/main.rs"
 name = "nx_echo_upstream"
 path = "src/bin/nx_echo_upstream.rs"
 
+[[bin]]
+name = "nx_flood_sim"
+path = "src/bin/nx_flood_sim.rs"
+
 [features]
 default = ["netio_mmsg"]
 netio_mmsg = ["nx_netio/mmsg"]
+torch_anomaly = ["dep:tch"]
 
 [dependencies]
 anyhow.workspace = true
@@ -37,6 +42,7 @@ socket2 = { version = "0.5", features = ["all"] }
 libc.workspace = true
 nx_metrics = { path = "../nx_metrics" }
 nx_netio = { path = "../nx_netio", default-features = false }
+tch = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3.15"

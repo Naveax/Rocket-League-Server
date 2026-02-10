@@ -18,7 +18,7 @@ critical_block_timeout_millis = 5
 telemetry_prefixes = ["TELE:", "STAT:"]
 
 [rate_limit]
-per_ip_packets_per_second = 800.0
+ddos_limit = 800.0
 per_ip_burst_packets = 1600.0
 per_ip_bytes_per_second = 800000.0
 per_ip_burst_bytes = 1600000.0
@@ -36,6 +36,20 @@ subnet_burst_bytes = 256000000.0
 max_ip_buckets = 65536
 max_subnet_buckets = 16384
 idle_timeout_secs = 120
+
+[anomaly]
+enabled = true
+model = "heuristic"
+anomaly_threshold = 0.8
+ddos_limit = 800.0
+window_millis = 200
+ema_alpha = 0.35
+min_packets_per_window = 12
+max_tracked_ips = 65536
+idle_timeout_secs = 120
+
+[flood_sim]
+allow_non_local = false
 
 [cookie]
 enabled = true

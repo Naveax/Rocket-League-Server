@@ -23,6 +23,8 @@ struct Inner {
     registry: Registry,
     forwarded_total: IntCounterVec,
     dropped_total: IntCounterVec,
+    anomaly_drops_total: IntCounter,
+    rate_limit_drops_total: IntCounter,
     rate_limited_total: IntCounter,
     queue_full_total: IntCounterVec,
     challenge_issued_total: IntCounter,
@@ -52,6 +54,20 @@ impl ProxyMetrics {
         let dropped_total = IntCounterVec::new(
             Opts::new("dropped_total", "Total dropped packets").namespace(namespace),
             &["reason"],
+        )?;
+        let anomaly_drops_total = IntCounter::with_opts(
+            Opts::new(
+                "anomaly_drops_total",
+                "Total packets dropped by anomaly detector",
+            )
+            .namespace(namespace),
+        )?;
+        let rate_limit_drops_total = IntCounter::with_opts(
+            Opts::new(
+                "rate_limit_drops_total",
+                "Total packets dropped by rate limiter",
+            )
+            .namespace(namespace),
         )?;
         let rate_limited_total = IntCounter::with_opts(
             Opts::new(
@@ -156,6 +172,8 @@ impl ProxyMetrics {
 
         registry.register(Box::new(forwarded_total.clone()))?;
         registry.register(Box::new(dropped_total.clone()))?;
+        registry.register(Box::new(anomaly_drops_total.clone()))?;
+        registry.register(Box::new(rate_limit_drops_total.clone()))?;
         registry.register(Box::new(rate_limited_total.clone()))?;
         registry.register(Box::new(queue_full_total.clone()))?;
         registry.register(Box::new(challenge_issued_total.clone()))?;
@@ -178,6 +196,8 @@ impl ProxyMetrics {
                 registry,
                 forwarded_total,
                 dropped_total,
+                anomaly_drops_total,
+                rate_limit_drops_total,
                 rate_limited_total,
                 queue_full_total,
                 challenge_issued_total,
@@ -207,6 +227,14 @@ impl ProxyMetrics {
 
     pub fn record_drop(&self, reason: &'static str) {
         self.inner.dropped_total.with_label_values(&[reason]).inc();
+    }
+
+    pub fn record_anomaly_drop(&self) {
+        self.inner.anomaly_drops_total.inc();
+    }
+
+    pub fn record_rate_limit_drop(&self) {
+        self.inner.rate_limit_drops_total.inc();
     }
 
     pub fn record_rate_limited(&self) {
@@ -291,6 +319,10 @@ impl ProxyMetrics {
         let mut buf = Vec::new();
         TextEncoder::new().encode(&metric_families, &mut buf)?;
         Ok(String::from_utf8_lossy(&buf).into_owned())
+    }
+
+    pub fn export_metrics(&self) -> String {
+        self.snapshot().unwrap_or_default()
     }
 
     pub fn spawn_exporter(

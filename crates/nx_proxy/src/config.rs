@@ -9,6 +9,10 @@ use serde::Deserialize;
 pub struct ProxyConfig {
     pub proxy: ProxySection,
     pub rate_limit: RateLimitSection,
+    #[serde(default)]
+    pub anomaly: AnomalySection,
+    #[serde(default)]
+    pub flood_sim: FloodSimSection,
     #[serde(default, alias = "challenge")]
     pub cookie: CookieSection,
     pub metrics: MetricsSection,
@@ -72,13 +76,20 @@ impl ProxySection {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitSection {
-    #[serde(alias = "packets_per_second")]
+    #[serde(
+        default = "default_per_ip_packets_per_second",
+        alias = "packets_per_second",
+        alias = "ddos_limit"
+    )]
     pub per_ip_packets_per_second: f64,
-    #[serde(alias = "burst_packets")]
+    #[serde(default = "default_per_ip_burst_packets", alias = "burst_packets")]
     pub per_ip_burst_packets: f64,
-    #[serde(alias = "bytes_per_second")]
+    #[serde(
+        default = "default_per_ip_bytes_per_second",
+        alias = "bytes_per_second"
+    )]
     pub per_ip_bytes_per_second: f64,
-    #[serde(alias = "burst_bytes")]
+    #[serde(default = "default_per_ip_burst_bytes", alias = "burst_bytes")]
     pub per_ip_burst_bytes: f64,
     #[serde(default = "default_global_packets_per_second")]
     pub global_packets_per_second: f64,
@@ -108,6 +119,53 @@ pub struct RateLimitSection {
     pub max_subnet_buckets: usize,
     #[serde(default = "default_idle_timeout_secs")]
     pub idle_timeout_secs: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnomalySection {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub model: AnomalyModel,
+    #[serde(default = "default_anomaly_threshold")]
+    pub anomaly_threshold: f32,
+    #[serde(default = "default_per_ip_packets_per_second")]
+    pub ddos_limit: f64,
+    #[serde(default = "default_anomaly_window_millis")]
+    pub window_millis: u64,
+    #[serde(default = "default_anomaly_ema_alpha")]
+    pub ema_alpha: f64,
+    #[serde(default = "default_anomaly_min_packets")]
+    pub min_packets_per_window: u32,
+    #[serde(default = "default_anomaly_max_tracked_ips")]
+    pub max_tracked_ips: usize,
+    #[serde(default = "default_anomaly_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+    #[serde(default)]
+    pub torch_model_path: Option<String>,
+}
+
+impl Default for AnomalySection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: AnomalyModel::default(),
+            anomaly_threshold: default_anomaly_threshold(),
+            ddos_limit: default_per_ip_packets_per_second(),
+            window_millis: default_anomaly_window_millis(),
+            ema_alpha: default_anomaly_ema_alpha(),
+            min_packets_per_window: default_anomaly_min_packets(),
+            max_tracked_ips: default_anomaly_max_tracked_ips(),
+            idle_timeout_secs: default_anomaly_idle_timeout_secs(),
+            torch_model_path: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct FloodSimSection {
+    #[serde(default)]
+    pub allow_non_local: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -168,6 +226,14 @@ pub enum CookieMode {
     Compat,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AnomalyModel {
+    #[default]
+    Heuristic,
+    Torch,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -202,6 +268,22 @@ fn default_critical_block_timeout_millis() -> u64 {
 
 fn default_idle_timeout_secs() -> u64 {
     300
+}
+
+fn default_per_ip_packets_per_second() -> f64 {
+    500.0
+}
+
+fn default_per_ip_burst_packets() -> f64 {
+    1_000.0
+}
+
+fn default_per_ip_bytes_per_second() -> f64 {
+    500_000.0
+}
+
+fn default_per_ip_burst_bytes() -> f64 {
+    1_000_000.0
 }
 
 fn default_global_packets_per_second() -> f64 {
@@ -250,6 +332,30 @@ fn default_max_ip_buckets() -> usize {
 
 fn default_max_subnet_buckets() -> usize {
     16_384
+}
+
+fn default_anomaly_threshold() -> f32 {
+    0.80
+}
+
+fn default_anomaly_window_millis() -> u64 {
+    200
+}
+
+fn default_anomaly_ema_alpha() -> f64 {
+    0.35
+}
+
+fn default_anomaly_min_packets() -> u32 {
+    12
+}
+
+fn default_anomaly_max_tracked_ips() -> usize {
+    65_536
+}
+
+fn default_anomaly_idle_timeout_secs() -> u64 {
+    120
 }
 
 fn default_cookie_secret() -> String {
@@ -348,6 +454,41 @@ impl ProxyConfig {
             bail!("rate_limit.max_subnet_buckets must be > 0");
         }
 
+        if !(0.0..=1.0).contains(&self.anomaly.anomaly_threshold)
+            || self.anomaly.anomaly_threshold <= 0.0
+        {
+            bail!("anomaly.anomaly_threshold must be in range (0, 1]");
+        }
+        if self.anomaly.ddos_limit <= 0.0 {
+            bail!("anomaly.ddos_limit must be > 0");
+        }
+        if self.anomaly.window_millis == 0 {
+            bail!("anomaly.window_millis must be > 0");
+        }
+        if !(0.0..=1.0).contains(&self.anomaly.ema_alpha) || self.anomaly.ema_alpha <= 0.0 {
+            bail!("anomaly.ema_alpha must be in range (0, 1]");
+        }
+        if self.anomaly.max_tracked_ips == 0 {
+            bail!("anomaly.max_tracked_ips must be > 0");
+        }
+        if self.anomaly.idle_timeout_secs == 0 {
+            bail!("anomaly.idle_timeout_secs must be > 0");
+        }
+
+        #[cfg(not(feature = "torch_anomaly"))]
+        if self.anomaly.enabled && self.anomaly.model == AnomalyModel::Torch {
+            bail!("anomaly.model=torch requires feature torch_anomaly");
+        }
+        #[cfg(feature = "torch_anomaly")]
+        if self.anomaly.enabled && self.anomaly.model == AnomalyModel::Torch {
+            let Some(path) = &self.anomaly.torch_model_path else {
+                bail!("anomaly.torch_model_path must be set when anomaly.model=torch");
+            };
+            if path.trim().is_empty() {
+                bail!("anomaly.torch_model_path must be non-empty when anomaly.model=torch");
+            }
+        }
+
         if self.cookie.enabled && self.cookie.secret.trim().is_empty() {
             bail!("cookie.secret must be non-empty when cookie is enabled");
         }
@@ -413,6 +554,20 @@ max_ip_buckets = 4096
 max_subnet_buckets = 2048
 idle_timeout_secs = 60
 
+[anomaly]
+enabled = true
+model = "heuristic"
+anomaly_threshold = 0.8
+ddos_limit = 500.0
+window_millis = 200
+ema_alpha = 0.35
+min_packets_per_window = 8
+max_tracked_ips = 4096
+idle_timeout_secs = 120
+
+[flood_sim]
+allow_non_local = false
+
 [cookie]
 enabled = true
 mode = "strict"
@@ -440,6 +595,10 @@ listen_addr = "127.0.0.1:9200"
         assert_eq!(parsed.cookie.token_ttl_secs, 30);
         assert_eq!(parsed.metrics.listen_addr.to_string(), "127.0.0.1:9200");
         assert!(parsed.rate_limit.subnet_enabled);
+        assert!(parsed.anomaly.enabled);
+        assert_eq!(parsed.anomaly.anomaly_threshold, 0.8);
+        assert_eq!(parsed.anomaly.ddos_limit, 500.0);
+        assert!(!parsed.flood_sim.allow_non_local);
     }
 
     #[test]
@@ -496,5 +655,68 @@ listen_addr = "127.0.0.1:9200"
         assert_eq!(parsed.cookie.max_tracked_peers, 65_536);
         assert_eq!(parsed.cookie.challenge_packets_per_second, 5_000.0);
         assert_eq!(parsed.cookie.challenge_burst_packets, 10_000.0);
+        assert!(!parsed.anomaly.enabled);
+        assert_eq!(parsed.anomaly.anomaly_threshold, 0.8);
+        assert_eq!(parsed.anomaly.ddos_limit, 500.0);
+        assert!(!parsed.flood_sim.allow_non_local);
+    }
+
+    #[test]
+    fn parse_ddos_limit_alias() {
+        let cfg = r#"
+[proxy]
+listen_addr = "127.0.0.1:7000"
+upstream_addr = "127.0.0.1:7001"
+
+[rate_limit]
+ddos_limit = 500.0
+per_ip_burst_packets = 1000.0
+per_ip_bytes_per_second = 500000.0
+per_ip_burst_bytes = 1000000.0
+
+[metrics]
+enabled = false
+listen_addr = "127.0.0.1:9200"
+"#;
+        let parsed = ProxyConfig::from_toml(cfg).expect("config should parse");
+        assert_eq!(parsed.rate_limit.per_ip_packets_per_second, 500.0);
+    }
+
+    #[test]
+    fn reject_invalid_anomaly_threshold() {
+        let cfg = good_config().replace("anomaly_threshold = 0.8", "anomaly_threshold = 1.5");
+        let err = ProxyConfig::from_toml(&cfg).expect_err("should fail validation");
+        assert!(
+            err.to_string().contains("anomaly.anomaly_threshold"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_zero_anomaly_window() {
+        let cfg = good_config().replace("window_millis = 200", "window_millis = 0");
+        let err = ProxyConfig::from_toml(&cfg).expect_err("should fail validation");
+        assert!(
+            err.to_string().contains("anomaly.window_millis"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn missing_anomaly_model_uses_default() {
+        let cfg = good_config().replace("model = \"heuristic\"\n", "");
+        let parsed = ProxyConfig::from_toml(&cfg).expect("config should parse");
+        assert_eq!(parsed.anomaly.model, AnomalyModel::Heuristic);
+    }
+
+    #[cfg(not(feature = "torch_anomaly"))]
+    #[test]
+    fn reject_torch_anomaly_without_feature() {
+        let cfg = good_config().replace("model = \"heuristic\"", "model = \"torch\"");
+        let err = ProxyConfig::from_toml(&cfg).expect_err("torch model should fail");
+        assert!(
+            err.to_string().contains("torch_anomaly"),
+            "unexpected error: {err}"
+        );
     }
 }

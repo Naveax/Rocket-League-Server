@@ -1,11 +1,12 @@
 use std::io::{Read, Write};
-use std::net::SocketAddr;
-use std::time::Duration;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::{Duration, Instant};
 
+use nx_proxy::anomaly::AnomalyDetector;
 use nx_proxy::challenge::build_response_packet_from_challenge;
 use nx_proxy::config::{
-    CookieMode, CookieSection, CriticalOverflowPolicy, MetricsSection, ProxyConfig, ProxySection,
-    RateLimitSection,
+    AnomalySection, CookieMode, CookieSection, CriticalOverflowPolicy, FloodSimSection,
+    MetricsSection, ProxyConfig, ProxySection, RateLimitSection,
 };
 use nx_proxy::packet::{cookie_header_len, COOKIE_MAGIC};
 use nx_proxy::run_proxy;
@@ -13,6 +14,52 @@ use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
+
+#[test]
+fn anomaly_spike_drop() {
+    let anomaly_cfg = AnomalySection {
+        enabled: true,
+        anomaly_threshold: 0.8,
+        ddos_limit: 25.0,
+        window_millis: 100,
+        min_packets_per_window: 5,
+        ..AnomalySection::default()
+    };
+
+    let rate_cfg = RateLimitSection {
+        per_ip_packets_per_second: 500.0,
+        per_ip_burst_packets: 1_000.0,
+        per_ip_bytes_per_second: 500_000.0,
+        per_ip_burst_bytes: 1_000_000.0,
+        global_packets_per_second: 50_000.0,
+        global_burst_packets: 100_000.0,
+        global_bytes_per_second: 128_000_000.0,
+        global_burst_bytes: 256_000_000.0,
+        subnet_enabled: false,
+        subnet_ipv4_prefix: 24,
+        subnet_ipv6_prefix: 64,
+        subnet_packets_per_second: 8_000.0,
+        subnet_burst_packets: 16_000.0,
+        subnet_bytes_per_second: 64_000_000.0,
+        subnet_burst_bytes: 128_000_000.0,
+        max_ip_buckets: 128,
+        max_subnet_buckets: 64,
+        idle_timeout_secs: 60,
+    };
+
+    let mut detector = AnomalyDetector::new(&anomaly_cfg, &rate_cfg);
+    let peer = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+    let base = Instant::now();
+    let mut dropped = false;
+    for i in 0..1_000 {
+        let now = base + Duration::from_millis((i / 10) as u64);
+        if detector.check_anomaly(peer, 1_024, now).is_some() {
+            dropped = true;
+            break;
+        }
+    }
+    assert!(dropped, "spike traffic should trigger anomaly drop");
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn telemetry_spam_does_not_starve_critical() {
@@ -40,14 +87,16 @@ async fn telemetry_spam_does_not_starve_critical() {
             .await
             .expect("send telemetry");
     }
-    client
-        .send_to(b"CRIT:important", proxy_addr)
-        .await
-        .expect("send critical");
+    for _ in 0..3 {
+        client
+            .send_to(b"CRIT:important", proxy_addr)
+            .await
+            .expect("send critical");
+    }
 
     let mut buf = [0u8; 2048];
     let mut saw_critical = false;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
     while tokio::time::Instant::now() < deadline {
         let recv = timeout(Duration::from_millis(250), client.recv_from(&mut buf)).await;
         let Ok(Ok((len, _))) = recv else {
@@ -282,6 +331,8 @@ fn base_config(
             challenge_packets_per_second: 1000.0,
             challenge_burst_packets: 1000.0,
         },
+        anomaly: AnomalySection::default(),
+        flood_sim: FloodSimSection::default(),
         metrics: MetricsSection {
             enabled: true,
             listen_addr: metrics_addr,

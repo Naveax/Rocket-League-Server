@@ -19,6 +19,7 @@ use nx_netio::{RecvBatchState, SendBatchState};
 #[cfg(all(feature = "netio_mmsg", target_os = "linux"))]
 use std::os::fd::AsRawFd;
 
+use crate::anomaly::AnomalyDetector;
 use crate::challenge::{now_unix_secs, ChallengeGate, GateDecision};
 use crate::config::{CriticalOverflowPolicy, ProxyConfig};
 use crate::lane::{classify_lane, TrafficLane};
@@ -126,10 +127,10 @@ struct EgressIo {
 }
 
 impl EgressIo {
-    fn new(batch_size: usize) -> Self {
+    fn new(_batch_size: usize) -> Self {
         Self {
             #[cfg(all(feature = "netio_mmsg", target_os = "linux"))]
-            send_state: SendBatchState::new(batch_size.max(1)),
+            send_state: SendBatchState::new(_batch_size.max(1)),
         }
     }
 
@@ -262,6 +263,7 @@ async fn run_worker(
     let client_socket = Arc::new(client_socket);
     let mut ingress_io = IngressIo::new(config.proxy.batch_size, config.proxy.max_datagram_bytes);
     let mut rate_limiter = MultiScopeRateLimiter::new(RateLimiterConfig::from(&config.rate_limit));
+    let mut anomaly_detector = AnomalyDetector::new(&config.anomaly, &config.rate_limit);
     let mut challenge_gate = ChallengeGate::new(&config.cookie);
     let packet_limits = PacketLimits {
         min_packet_size: config.proxy.min_datagram_bytes,
@@ -373,8 +375,19 @@ async fn run_worker(
                     if let Err(scope) = rate_limiter.allow(inbound.client_addr.ip(), payload.len()) {
                         metrics.record_udp_rate_limited(scope.as_label());
                         metrics.record_udp_drop("udp_rate_limited");
+                        metrics.record_rate_limit_drop();
                         metrics.record_rate_limited();
                         metrics.record_drop("rate_limited");
+                        continue;
+                    }
+
+                    if anomaly_detector
+                        .should_drop(inbound.client_addr.ip(), payload.len())
+                        .is_some()
+                    {
+                        metrics.record_udp_drop("anomaly_suspected");
+                        metrics.record_anomaly_drop();
+                        metrics.record_drop("anomaly_suspected");
                         continue;
                     }
 
@@ -735,6 +748,8 @@ async fn recv_prioritized<T: Send + 'static>(
         }
 
         tokio::select! {
+            biased;
+
             _ = shutdown.cancelled() => return None,
             recv = critical_rx.recv_async() => {
                 match recv {
