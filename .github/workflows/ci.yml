@@ -6,6 +6,7 @@ on:
 
 jobs:
   rust-checks:
+    name: rust-checks-fmt-clippy-test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -16,11 +17,17 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
       - name: Cargo fmt
         run: cargo fmt --all -- --check
 
       - name: Cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Cargo test
+        run: cargo test --all
 
       - name: Cargo test (release)
         run: cargo test --all --release
